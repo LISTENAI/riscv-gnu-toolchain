@@ -593,6 +593,10 @@ stamps/build-binutils-newlib: $(BINUTILS_SRCDIR) $(BINUTILS_SRC_GIT) stamps/chec
 		--disable-libdecnumber \
 		--disable-readline \
 		--with-static-standard-libraries \
+		--with-system-zlib \
+		--without-zstd \
+		--disable-nls \
+		CFLAGS="-g -O2 -Wno-error=implicit-int -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-pointer-types" \
 		$(WITH_ISA_SPEC)
 	$(MAKE) -C $(notdir $@)
 	$(MAKE) -C $(notdir $@) install
@@ -623,6 +627,15 @@ stamps/build-gdb-newlib: $(GDB_SRCDIR) $(GDB_SRC_GIT)
 		--with-libiconv-type=static \
 		--with-libgmp-type=static \
 		--with-libmpfr-type=static \
+		--with-gmp=$(shell brew --prefix) \
+		--with-mpfr=$(shell brew --prefix) \
+		--with-libexpat-prefix=$(shell brew --prefix)/opt/expat \
+		--with-system-zlib \
+		--without-python \
+		--disable-nls \
+		--without-lzma \
+		--without-zstd \
+		CFLAGS="-g -O2 -Wno-error=implicit-int -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=incompatible-pointer-types" \
 		--disable-gprof
 	$(MAKE) -C $(notdir $@)
 	$(MAKE) -C $(notdir $@) install
