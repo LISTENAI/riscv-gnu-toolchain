@@ -4,56 +4,178 @@ on:
   push:
     branches:
       - master
+      - nuclei/*
+    tags:
+      # LISTENAI release tags, e.g. listenai/nuclei-2025.10/r1
+      - listenai/**
   pull_request:
     branches:
       - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# ---------------------------------------------------------------------------
+# Toolchain configuration. Tweak these to support new chips; the values are
+# echoed into the GitHub Release notes so every release records exactly what
+# it was built with.
+# ---------------------------------------------------------------------------
+env:
+  # Default arch / ABI the toolchain is configured with.
+  TARGET_ARCH: rv64ima
+  TARGET_ABI: lp64
+  # Multilib variants compiled into the toolchain. Add an entry here to support
+  # a new chip. Format: <arch>-<abi>-<extra>-<exclude>, entries separated by ';'
+  # (passed verbatim to GCC's --with-multilib-generator).
+  MULTILIB_GENERATOR: rv32imafc_zba_zbb_zbc_zbs_xxldsp-ilp32f--
+  # Build GDB into the toolchain.
+  INCLUDE_GDB: "true"
 
 jobs:
   build:
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os:     [ubuntu-20.04, ubuntu-22.04]
-        mode:   [newlib, linux, musl]
-        target: [rv32gc-ilp32d, rv64gc-lp64d]
-        exclude:
-          - mode: musl
-            target: rv32gc-ilp32d
+        os:
+          - macos-26        # Apple Silicon (arm64)
+          - macos-26-intel  # Intel (x86_64)
     steps:
-      - uses: actions/checkout@v2
-
-      - name: initialize submodules
+      - name: Prepare case-sensitive filesystem
         run: |
-          git submodule init
-          git submodule update --recursive --progress --recommend-shallow
+          hdiutil create -size 100g -fs 'Case-sensitive APFS' \
+            -volname riscv-gnu-toolchain -type SPARSEBUNDLE riscv-gnu-toolchain.sparsebundle
+          hdiutil attach riscv-gnu-toolchain.sparsebundle -mountpoint ./riscv-gnu-toolchain
 
-      - name: install dependencies
-        run: sudo ./.github/setup-apt.sh
-
-      - name: build toolchain
-        run: |
-          TARGET_TUPLE=($(echo ${{ matrix.target }} | tr "-" "\n"))
-          ./configure --prefix=/opt/riscv --with-arch=${TARGET_TUPLE[0]} --with-abi=${TARGET_TUPLE[1]}
-          sudo make -j $(nproc) ${{ matrix.mode }}
-
-      - name: tarball build
-        run: tar czvf riscv.tar.gz -C /opt/ riscv/
-
-      - name: generate prebuilt toolchain name
-        id:   toolchain-name-generator
-        run: |
-          if [[ "${{ matrix.target }}" == *"32"* ]]; then BITS=32; else BITS=64; fi
-          case "${{ matrix.mode }}" in
-            "linux")
-              MODE="glibc";;
-            "musl")
-              MODE="musl";;
-            *)
-              MODE="elf";;
-          esac
-          echo ::set-output name=TOOLCHAIN_NAME::riscv$BITS-$MODE-${{ matrix.os }}-nightly
-
-      - uses: actions/upload-artifact@v2
+      - uses: actions/checkout@v6
         with:
-          name: ${{ steps.toolchain-name-generator.outputs.TOOLCHAIN_NAME }}
-          path: riscv.tar.gz
+          path: riscv-gnu-toolchain
+          submodules: false
+
+      - name: Checkout required submodules
+        working-directory: riscv-gnu-toolchain
+        run: |
+          # A bare-metal (newlib) build only needs these; skip the huge llvm /
+          # glibc / musl / spike / pk checkouts that `recursive` would pull in.
+          modules="binutils gcc newlib"
+          [ "$INCLUDE_GDB" = "true" ] && modules="$modules gdb"
+          git submodule update --init $modules
+
+      - name: Install dependencies
+        working-directory: riscv-gnu-toolchain
+        run: |
+          ./.github/setup-brew.sh
+
+          BREW_PREFIX=$(brew --prefix)
+          {
+            echo "$BREW_PREFIX/opt/bison/bin"
+            echo "$BREW_PREFIX/opt/expat/bin"
+            echo "$BREW_PREFIX/opt/gawk/libexec/gnubin"
+            echo "$BREW_PREFIX/opt/gnu-sed/libexec/gnubin"
+            echo "$BREW_PREFIX/opt/m4/bin"
+            echo "$BREW_PREFIX/opt/make/libexec/gnubin"
+          } >> "$GITHUB_PATH"
+          {
+            echo "GNUMAKE=$BREW_PREFIX/opt/make/libexec/gnubin/make"
+            echo "MAKE=$BREW_PREFIX/opt/make/libexec/gnubin/make"
+            echo "CPLUS_INCLUDE_PATH=$(xcrun --show-sdk-path)/usr/include/c++/v1"
+          } >> "$GITHUB_ENV"
+
+          sudo xcode-select --switch /Library/Developer/CommandLineTools
+          ulimit -n 65536 || true
+
+      - name: Generate toolchain name
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # listenai/nuclei-2025.02/r1 -> nuclei-2025.02-r1
+            version=$(echo "${{ github.ref_name }}" | sed 's#^listenai/##; s#/#-#g')
+          else
+            version=nightly
+          fi
+          name="riscv-gnu-toolchain-macos-$(uname -m)-$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Build toolchain
+        working-directory: riscv-gnu-toolchain
+        run: |
+          [ "$INCLUDE_GDB" = "true" ] || gdb_flag=--disable-gdb
+          ./configure \
+            --prefix="/opt/${{ steps.meta.outputs.name }}" \
+            --with-arch="$TARGET_ARCH" \
+            --with-abi="$TARGET_ABI" \
+            --with-multilib-generator="$MULTILIB_GENERATOR" \
+            $gdb_flag
+          sudo make -j "$(sysctl -n hw.ncpu)" newlib
+
+      - name: Create tarball
+        run: |
+          tar czvf "${{ steps.meta.outputs.name }}.tar.gz" \
+            -C /opt "${{ steps.meta.outputs.name }}"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: ${{ steps.meta.outputs.name }}.tar.gz
+
+  release:
+    name: release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest  # packaging only, no compilation happens here
+    steps:
+      - name: Download all toolchains
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Generate release notes
+        run: |
+          tag="${{ github.ref_name }}"
+          base=$(echo "$tag" | cut -d/ -f2)   # nuclei-2025.02
+          rev=$(echo "$tag" | cut -d/ -f3)    # r1
+
+          {
+            echo "Prebuilt **Nuclei RISC-V GNU Toolchain** (bare-metal / newlib) for macOS."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Based on | Nuclei \`$base\` |"
+            echo "| LISTENAI revision | \`$rev\` |"
+            echo "| Default arch / ABI | \`$TARGET_ARCH\` / \`$TARGET_ABI\` |"
+            if [ "$INCLUDE_GDB" = "true" ]; then
+              echo "| GDB | included |"
+            else
+              echo "| GDB | not included |"
+            fi
+            echo
+            echo "### Multilib variants (chip support)"
+            echo
+            echo "| arch | abi |"
+            echo "|------|-----|"
+            IFS=';' read -ra libs <<< "$MULTILIB_GENERATOR"
+            for lib in "${libs[@]}"; do
+              arch=$(echo "$lib" | cut -d- -f1)
+              abi=$(echo "$lib" | cut -d- -f2)
+              echo "| \`$arch\` | \`$abi\` |"
+            done
+            echo
+            echo "### Downloads"
+            echo
+            echo "| host | file |"
+            echo "|------|------|"
+            echo "| Apple Silicon (arm64) | \`riscv-gnu-toolchain-macos-arm64-$base-$rev.tar.gz\` |"
+            echo "| Intel (x86_64) | \`riscv-gnu-toolchain-macos-x86_64-$base-$rev.tar.gz\` |"
+          } > RELEASE_NOTES.md
+
+          cat RELEASE_NOTES.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: artifacts/**/*.tar.gz
