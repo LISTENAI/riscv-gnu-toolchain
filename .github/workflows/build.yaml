@@ -28,7 +28,7 @@ env:
   # Multilib variants compiled into the toolchain. Add an entry here to support
   # a new chip. Format: <arch>-<abi>-<extra>-<exclude>, entries separated by ';'
   # (passed verbatim to GCC's --with-multilib-generator).
-  MULTILIB_GENERATOR: rv32imafc_zba_zbb_zbc_zbs_xxldsp-ilp32f--
+  MULTILIB_GENERATOR: rv32imac_zba_zbb_zbc_zbs-ilp32--;rv32imafc_zba_zbb_zbc_zbs-ilp32f--;rv32imafc_zba_zbb_zbc_zbs_xxldsp-ilp32f--
   # Build GDB into the toolchain.
   INCLUDE_GDB: "true"
 
